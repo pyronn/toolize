@@ -45,6 +45,27 @@ backup_file() {
     fi
 }
 
+# ==================== Ensure SSHD Installed ====================
+ensure_sshd() {
+    if command -v sshd &>/dev/null && systemctl is-active --quiet ssh 2>/dev/null; then
+        return 0
+    fi
+
+    warn "OpenSSH Server is not installed or not running."
+    info "Installing openssh-server..."
+    apt-get update -y
+    apt-get install -y openssh-server
+    systemctl enable ssh
+    systemctl start ssh
+
+    if systemctl is-active --quiet ssh 2>/dev/null; then
+        info "OpenSSH Server installed and running."
+    else
+        error "Failed to start SSH service. Please check manually."
+        exit 1
+    fi
+}
+
 # ==================== Main Menu ====================
 show_menu() {
     echo ""
@@ -68,6 +89,7 @@ show_menu() {
 #============================================================================
 ssh_security_init() {
     section "Option 1: SSH Security Initialization"
+    ensure_sshd
 
     # ---------- Create sudo user ----------
     info "Step 1: Create a new sudo user"
@@ -94,7 +116,7 @@ ssh_security_init() {
             fi
         done
 
-        adduser --gecos "" --disabled-login "$NEW_USER"
+        adduser --gecos "" --disabled-password "$NEW_USER"
         echo "${NEW_USER}:${USER_PASS}" | chpasswd
         usermod -aG sudo "$NEW_USER"
         info "User '$NEW_USER' created and added to sudo group."
@@ -206,6 +228,7 @@ ssh_security_init() {
 #============================================================================
 disable_password_auth() {
     section "Option 2: Disable Password Authentication"
+    ensure_sshd
 
     warn "This will disable password login for ALL users."
     warn "Make sure you have uploaded your SSH public key and tested key-based login."
@@ -287,6 +310,7 @@ disable_password_auth() {
 #============================================================================
 server_security_hardening() {
     section "Option 3: Server Security Hardening"
+    ensure_sshd
 
     # Detect current SSH port from sshd_config
     CURRENT_SSH_PORT=$(grep -E "^Port\s+" /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}')
