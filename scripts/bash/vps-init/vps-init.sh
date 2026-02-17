@@ -308,22 +308,20 @@ disable_password_auth() {
 #   - Timezone & NTP
 #   - Common tools
 #============================================================================
-server_security_hardening() {
-    section "Option 3: Server Security Hardening"
-    ensure_sshd
+# ==================== Sub-functions for Option 3 ====================
 
-    # Detect current SSH port from sshd_config
+# Detect current SSH port (used by multiple sub-options)
+detect_ssh_port() {
     CURRENT_SSH_PORT=$(grep -E "^Port\s+" /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}')
     CURRENT_SSH_PORT=${CURRENT_SSH_PORT:-22}
-    info "Detected current SSH port: $CURRENT_SSH_PORT"
-    echo ""
+}
 
-    # ---------- 3.1 System Update ----------
+hardening_system_update() {
+    section "System Update & Common Tools"
     info "Updating system packages..."
     apt-get update -y && apt-get upgrade -y
     info "System updated."
-
-    # ---------- 3.2 Install Common Tools ----------
+    echo ""
     info "Installing common tools..."
     apt-get install -y \
         curl wget vim htop iotop net-tools \
@@ -331,22 +329,19 @@ server_security_hardening() {
         software-properties-common apt-transport-https \
         ca-certificates gnupg
     info "Common tools installed."
+}
 
-    # ---------- 3.3 UFW Firewall ----------
+hardening_ufw() {
     section "Configuring UFW Firewall"
+    detect_ssh_port
+    info "Detected current SSH port: $CURRENT_SSH_PORT"
     apt-get install -y ufw
 
-    # Reset UFW to defaults
     ufw --force reset
-
-    # Default policies
     ufw default deny incoming
     ufw default allow outgoing
-
-    # Allow SSH port
     ufw allow "${CURRENT_SSH_PORT}/tcp" comment "SSH"
 
-    # Ask about common ports
     echo ""
     if confirm "Allow HTTP (80)?"; then
         ufw allow 80/tcp comment "HTTP"
@@ -359,7 +354,7 @@ server_security_hardening() {
     if [[ -n "$EXTRA_PORTS" ]]; then
         IFS=',' read -ra PORT_ARRAY <<< "$EXTRA_PORTS"
         for port in "${PORT_ARRAY[@]}"; do
-            port=$(echo "$port" | xargs)  # trim whitespace
+            port=$(echo "$port" | xargs)
             if [[ "$port" =~ ^[0-9]+$ ]] && (( port >= 1 && port <= 65535 )); then
                 ufw allow "${port}/tcp" comment "Custom"
                 info "Allowed port $port/tcp"
@@ -372,13 +367,14 @@ server_security_hardening() {
     ufw --force enable
     info "UFW firewall enabled."
     ufw status verbose
-    echo ""
+}
 
-    # ---------- 3.4 Fail2ban ----------
+hardening_fail2ban() {
     section "Configuring Fail2ban"
+    detect_ssh_port
+    info "Detected current SSH port: $CURRENT_SSH_PORT"
     apt-get install -y fail2ban
 
-    # Create local jail config (overrides default safely)
     cat > /etc/fail2ban/jail.local << FAIL2BAN_EOF
 [DEFAULT]
 bantime  = 3600
@@ -399,20 +395,18 @@ FAIL2BAN_EOF
     systemctl restart fail2ban
     info "Fail2ban configured and started."
     fail2ban-client status sshd 2>/dev/null || true
-    echo ""
+}
 
-    # ---------- 3.5 Unattended Upgrades ----------
+hardening_auto_updates() {
     section "Configuring Automatic Security Updates"
     apt-get install -y unattended-upgrades apt-listchanges
 
-    # Enable automatic security updates
     cat > /etc/apt/apt.conf.d/20auto-upgrades << 'AUTOUPGRADE_EOF'
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
 APT::Periodic::AutocleanInterval "7";
 AUTOUPGRADE_EOF
 
-    # Configure unattended-upgrades to only apply security patches
     cat > /etc/apt/apt.conf.d/50unattended-upgrades << 'UNATTENDED_EOF'
 Unattended-Upgrade::Allowed-Origins {
     "${distro_id}:${distro_codename}-security";
@@ -428,9 +422,9 @@ UNATTENDED_EOF
     systemctl enable unattended-upgrades
     systemctl restart unattended-upgrades
     info "Automatic security updates enabled."
-    echo ""
+}
 
-    # ---------- 3.6 Kernel Network Hardening (sysctl) ----------
+hardening_sysctl() {
     section "Kernel Network Parameter Hardening"
 
     SYSCTL_FILE="/etc/sysctl.d/99-security.conf"
@@ -480,9 +474,9 @@ SYSCTL_EOF
 
     sysctl -p "$SYSCTL_FILE"
     info "Kernel network parameters hardened."
-    echo ""
+}
 
-    # ---------- 3.7 Timezone & NTP ----------
+hardening_timezone_ntp() {
     section "Timezone & NTP Configuration"
 
     CURRENT_TZ=$(timedatectl show --property=Timezone --value 2>/dev/null || echo "unknown")
@@ -503,16 +497,15 @@ SYSCTL_EOF
             ;;
     esac
 
-    # Configure NTP
     apt-get install -y systemd-timesyncd
     systemctl enable systemd-timesyncd
     systemctl restart systemd-timesyncd
     timedatectl set-ntp true
     info "NTP time synchronization enabled."
     timedatectl status
-    echo ""
+}
 
-    # ---------- 3.8 Disable Unused Services ----------
+hardening_disable_services() {
     section "Disabling Unused Services"
     local services_to_disable=("snapd" "cups" "avahi-daemon" "bluetooth")
     for svc in "${services_to_disable[@]}"; do
@@ -524,19 +517,102 @@ SYSCTL_EOF
             info "Not active, skipping: $svc"
         fi
     done
-    echo ""
+}
 
-    # ---------- Summary ----------
-    section "Server Security Hardening Complete"
-    echo -e "  ${GREEN}✓${NC} System packages updated"
-    echo -e "  ${GREEN}✓${NC} Common tools installed"
-    echo -e "  ${GREEN}✓${NC} UFW firewall enabled (SSH port: ${CURRENT_SSH_PORT})"
-    echo -e "  ${GREEN}✓${NC} Fail2ban active (SSH protection)"
-    echo -e "  ${GREEN}✓${NC} Automatic security updates enabled"
-    echo -e "  ${GREEN}✓${NC} Kernel network parameters hardened"
-    echo -e "  ${GREEN}✓${NC} Timezone & NTP configured"
-    echo -e "  ${GREEN}✓${NC} Unused services disabled"
-    echo ""
+# ==================== Option 3: Server Security Hardening ====================
+server_security_hardening() {
+    section "Option 3: Server Security Hardening"
+    ensure_sshd
+
+    # Define items
+    local items=(
+        "System Update & Install Common Tools"
+        "UFW Firewall"
+        "Fail2ban (Anti Brute-force)"
+        "Automatic Security Updates"
+        "Kernel Network Hardening (sysctl)"
+        "Timezone & NTP Sync"
+        "Disable Unused Services"
+    )
+    local funcs=(
+        hardening_system_update
+        hardening_ufw
+        hardening_fail2ban
+        hardening_auto_updates
+        hardening_sysctl
+        hardening_timezone_ntp
+        hardening_disable_services
+    )
+    local selected=()
+
+    # Display sub-menu
+    while true; do
+        echo ""
+        echo -e "${BOLD}┌──────────────────────────────────────────────┐${NC}"
+        echo -e "${BOLD}│       Server Security Hardening Items        │${NC}"
+        echo -e "${BOLD}├──────────────────────────────────────────────┤${NC}"
+        for i in "${!items[@]}"; do
+            local idx=$((i + 1))
+            echo -e "${BOLD}│  ${idx}) ${items[$i]}$(printf '%*s' $((40 - ${#items[$i]})) '')│${NC}"
+        done
+        echo -e "${BOLD}├──────────────────────────────────────────────┤${NC}"
+        echo -e "${BOLD}│  a) Select ALL                               │${NC}"
+        echo -e "${BOLD}│  0) Back to main menu                        │${NC}"
+        echo -e "${BOLD}└──────────────────────────────────────────────┘${NC}"
+        echo ""
+        read -rp "Select items to execute (e.g. 1,3,5 or 'a' for all): " selection
+
+        if [[ "$selection" == "0" ]]; then
+            return 0
+        fi
+
+        selected=()
+        if [[ "$selection" =~ ^[Aa]$ ]]; then
+            for i in "${!funcs[@]}"; do
+                selected+=("$i")
+            done
+        else
+            IFS=',' read -ra choices <<< "$selection"
+            for choice in "${choices[@]}"; do
+                choice=$(echo "$choice" | xargs)
+                if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#items[@]} )); then
+                    selected+=("$((choice - 1))")
+                else
+                    warn "Skipping invalid choice: $choice"
+                fi
+            done
+        fi
+
+        if [[ ${#selected[@]} -eq 0 ]]; then
+            warn "No valid items selected."
+            continue
+        fi
+
+        # Confirm selection
+        echo ""
+        info "You selected:"
+        for idx in "${selected[@]}"; do
+            echo -e "  ${CYAN}→${NC} ${items[$idx]}"
+        done
+        echo ""
+        confirm "Proceed with these items?" || continue
+
+        # Execute selected items
+        local completed=()
+        for idx in "${selected[@]}"; do
+            ${funcs[$idx]}
+            completed+=("${items[$idx]}")
+            echo ""
+        done
+
+        # Summary
+        section "Hardening Complete"
+        for item in "${completed[@]}"; do
+            echo -e "  ${GREEN}✓${NC} ${item}"
+        done
+        echo ""
+        return 0
+    done
 }
 
 #============================================================================
