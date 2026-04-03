@@ -45,6 +45,16 @@ backup_file() {
     fi
 }
 
+# ==================== Global SSH Config Helper ====================
+# Removes all existing lines (including commented) for a key, then appends the new value.
+set_sshd_option() {
+    local key="$1"
+    local value="$2"
+    local file="$3"
+    sed -i "/^[#[:space:]]*${key}[[:space:]]/d" "$file"
+    echo "${key} ${value}" >> "$file"
+}
+
 # ==================== Ensure SSHD Installed ====================
 ensure_sshd() {
     if command -v sshd &>/dev/null && systemctl is-active --quiet ssh 2>/dev/null; then
@@ -82,30 +92,29 @@ show_menu() {
 
 #============================================================================
 # Option 1: SSH Security Initialization
-#   - Create sudo user
-#   - Reset root password
-#   - Disable root SSH login
-#   - Change SSH port
+#   Steps can be run individually or all in sequence.
 #============================================================================
-ssh_security_init() {
-    section "Option 1: SSH Security Initialization"
+
+# Shared state between steps (populated by step 1, consumed by step 3)
+_SSH_INIT_USER=""
+
+# ---------- Step 1: Create sudo user ----------
+ssh_step_create_user() {
+    section "SSH Init — Step 1: Create Sudo User"
     ensure_sshd
 
-    # ---------- Create sudo user ----------
-    info "Step 1: Create a new sudo user"
-    read -rp "Enter new username: " NEW_USER
+    read -rp "Enter new username: " _SSH_INIT_USER
 
-    if [[ -z "$NEW_USER" ]]; then
+    if [[ -z "$_SSH_INIT_USER" ]]; then
         error "Username cannot be empty."
         return 1
     fi
 
-    if id "$NEW_USER" &>/dev/null; then
-        warn "User '$NEW_USER' already exists, skipping creation."
+    if id "$_SSH_INIT_USER" &>/dev/null; then
+        warn "User '$_SSH_INIT_USER' already exists, skipping creation."
     else
-        # Read password with confirmation
         while true; do
-            read -srp "Enter password for '$NEW_USER': " USER_PASS
+            read -srp "Enter password for '$_SSH_INIT_USER': " USER_PASS
             echo
             read -srp "Confirm password: " USER_PASS_CONFIRM
             echo
@@ -116,23 +125,29 @@ ssh_security_init() {
             fi
         done
 
-        adduser --gecos "" --disabled-password "$NEW_USER"
-        echo "${NEW_USER}:${USER_PASS}" | chpasswd
-        usermod -aG sudo "$NEW_USER"
-        info "User '$NEW_USER' created and added to sudo group."
+        adduser --gecos "" --disabled-password "$_SSH_INIT_USER"
+        echo "${_SSH_INIT_USER}:${USER_PASS}" | chpasswd
+        usermod -aG sudo "$_SSH_INIT_USER"
+        info "User '$_SSH_INIT_USER' created and added to sudo group."
     fi
 
-    # Create .ssh directory for the new user
-    NEW_USER_HOME=$(eval echo "~$NEW_USER")
-    mkdir -p "${NEW_USER_HOME}/.ssh"
-    chmod 700 "${NEW_USER_HOME}/.ssh"
-    touch "${NEW_USER_HOME}/.ssh/authorized_keys"
-    chmod 600 "${NEW_USER_HOME}/.ssh/authorized_keys"
-    chown -R "${NEW_USER}:${NEW_USER}" "${NEW_USER_HOME}/.ssh"
-    info "Created ~/.ssh/authorized_keys for '$NEW_USER'."
+    local user_home
+    user_home=$(eval echo "~$_SSH_INIT_USER")
+    mkdir -p "${user_home}/.ssh"
+    chmod 700 "${user_home}/.ssh"
+    touch "${user_home}/.ssh/authorized_keys"
+    chmod 600 "${user_home}/.ssh/authorized_keys"
+    chown -R "${_SSH_INIT_USER}:${_SSH_INIT_USER}" "${user_home}/.ssh"
 
-    # ---------- Reset root password ----------
-    info "Step 2: Reset root password"
+    echo ""
+    echo -e "  ${GREEN}✓${NC} User:     ${BOLD}${_SSH_INIT_USER}${NC} (sudo group)"
+    echo -e "  ${GREEN}✓${NC} SSH dir:  ${CYAN}${user_home}/.ssh/authorized_keys${NC} ready"
+}
+
+# ---------- Step 2: Reset root password ----------
+ssh_step_reset_root_password() {
+    section "SSH Init — Step 2: Reset Root Password"
+
     while true; do
         read -srp "Enter new root password: " ROOT_PASS
         echo
@@ -145,38 +160,49 @@ ssh_security_init() {
         fi
     done
     echo "root:${ROOT_PASS}" | chpasswd
-    info "Root password has been changed."
 
-    # ---------- Change SSH port ----------
-    info "Step 3: Change SSH port"
-    read -rp "Enter new SSH port (default 22, recommended 10000-65535): " NEW_SSH_PORT
-    NEW_SSH_PORT=${NEW_SSH_PORT:-22}
+    echo ""
+    echo -e "  ${GREEN}✓${NC} Root password: changed"
+}
 
-    # Validate port number
+# ---------- Step 3: Configure SSH daemon ----------
+ssh_step_configure_daemon() {
+    section "SSH Init — Step 3: Configure SSH Daemon"
+    ensure_sshd
+
+    # If step 1 was skipped, ask for the username to add to AllowUsers
+    local allow_user="$_SSH_INIT_USER"
+    if [[ -z "$allow_user" ]]; then
+        read -rp "Enter username to allow SSH (AllowUsers): " allow_user
+        if [[ -z "$allow_user" ]]; then
+            error "Username cannot be empty."
+            return 1
+        fi
+        if ! id "$allow_user" &>/dev/null; then
+            warn "User '$allow_user' does not exist on this system."
+            confirm "Continue anyway?" || return 1
+        fi
+    fi
+
+    # Detect current port as default
+    local current_port
+    current_port=$(grep -E "^Port\s+" /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}')
+    current_port=${current_port:-22}
+
+    read -rp "Enter new SSH port (current: ${current_port}, press Enter to keep): " NEW_SSH_PORT
+    NEW_SSH_PORT=${NEW_SSH_PORT:-$current_port}
+
     if ! [[ "$NEW_SSH_PORT" =~ ^[0-9]+$ ]] || (( NEW_SSH_PORT < 1 || NEW_SSH_PORT > 65535 )); then
         error "Invalid port number: $NEW_SSH_PORT"
         return 1
     fi
 
-    # ---------- Disable root login & apply SSH port ----------
-    info "Step 4: Configure SSH daemon"
-    SSHD_CONFIG="/etc/ssh/sshd_config"
+    local SSHD_CONFIG="/etc/ssh/sshd_config"
     backup_file "$SSHD_CONFIG"
 
-    # Use a temporary file for safe editing
+    local SSHD_TMP
     SSHD_TMP=$(mktemp)
     cp "$SSHD_CONFIG" "$SSHD_TMP"
-
-    # Function to set or add an SSH config directive
-    set_sshd_option() {
-        local key="$1"
-        local value="$2"
-        local file="$3"
-        # Remove all existing lines (including commented ones) for this key
-        sed -i "/^[#[:space:]]*${key}[[:space:]]/d" "$file"
-        # Append the new value
-        echo "${key} ${value}" >> "$file"
-    }
 
     set_sshd_option "Port"                  "$NEW_SSH_PORT" "$SSHD_TMP"
     set_sshd_option "PermitRootLogin"       "no"            "$SSHD_TMP"
@@ -185,40 +211,117 @@ ssh_security_init() {
     set_sshd_option "ClientAliveInterval"   "300"           "$SSHD_TMP"
     set_sshd_option "ClientAliveCountMax"   "3"             "$SSHD_TMP"
     set_sshd_option "X11Forwarding"         "no"            "$SSHD_TMP"
-    set_sshd_option "AllowUsers"            "$NEW_USER"     "$SSHD_TMP"
+    set_sshd_option "AllowUsers"            "$allow_user"   "$SSHD_TMP"
 
-    # Validate the new config before applying
     cp "$SSHD_TMP" "$SSHD_CONFIG"
     if sshd -t 2>/dev/null; then
         info "SSH config validation passed."
     else
         error "SSH config validation failed! Restoring backup..."
-        cp "${SSHD_CONFIG}.bak."* "$SSHD_CONFIG" 2>/dev/null
+        local latest_bak
+        latest_bak=$(ls -t "${SSHD_CONFIG}.bak."* 2>/dev/null | head -1)
+        [[ -n "$latest_bak" ]] && cp "$latest_bak" "$SSHD_CONFIG"
         rm -f "$SSHD_TMP"
         return 1
     fi
     rm -f "$SSHD_TMP"
 
-    # Restart SSH service
     systemctl restart sshd
     info "SSH service restarted."
 
-    # ---------- Summary ----------
-    section "SSH Security Init Complete"
-    echo -e "  ${GREEN}✓${NC} New user:          ${BOLD}${NEW_USER}${NC}"
-    echo -e "  ${GREEN}✓${NC} Root password:     changed"
+    echo ""
     echo -e "  ${GREEN}✓${NC} Root SSH login:    ${RED}disabled${NC}"
     echo -e "  ${GREEN}✓${NC} SSH port:          ${BOLD}${NEW_SSH_PORT}${NC}"
-    echo -e "  ${GREEN}✓${NC} Allowed SSH users: ${BOLD}${NEW_USER}${NC}"
+    echo -e "  ${GREEN}✓${NC} Allowed SSH users: ${BOLD}${allow_user}${NC}"
     echo ""
     warn "IMPORTANT: Do NOT close this session!"
     warn "Open a NEW terminal and test SSH login before disconnecting:"
-    echo -e "    ${CYAN}ssh -p ${NEW_SSH_PORT} ${NEW_USER}@<your-server-ip>${NC}"
+    echo -e "    ${CYAN}ssh -p ${NEW_SSH_PORT} ${allow_user}@<your-server-ip>${NC}"
     echo ""
     warn "After logging in, upload your public key with:"
-    echo -e "    ${CYAN}ssh-copy-id -p ${NEW_SSH_PORT} ${NEW_USER}@<your-server-ip>${NC}"
+    echo -e "    ${CYAN}ssh-copy-id -p ${NEW_SSH_PORT} ${allow_user}@<your-server-ip>${NC}"
     echo -e "    or manually paste your key into: ${CYAN}~/.ssh/authorized_keys${NC}"
-    echo ""
+}
+
+# ==================== Option 1 Sub-menu ====================
+ssh_security_init() {
+    local items=(
+        "Create Sudo User"
+        "Reset Root Password"
+        "Configure SSH Daemon (Port + Security)"
+    )
+    local funcs=(
+        ssh_step_create_user
+        ssh_step_reset_root_password
+        ssh_step_configure_daemon
+    )
+
+    while true; do
+        _SSH_INIT_USER=""   # reset shared state on each menu visit
+
+        echo ""
+        echo -e "${BOLD}┌──────────────────────────────────────────────┐${NC}"
+        echo -e "${BOLD}│       SSH Security Initialization Steps      │${NC}"
+        echo -e "${BOLD}├──────────────────────────────────────────────┤${NC}"
+        for i in "${!items[@]}"; do
+            local idx=$((i + 1))
+            printf "${BOLD}│  %d) %-42s│${NC}\n" "$idx" "${items[$i]}"
+        done
+        echo -e "${BOLD}├──────────────────────────────────────────────┤${NC}"
+        echo -e "${BOLD}│  a) Run all steps in sequence                │${NC}"
+        echo -e "${BOLD}│  0) Back to main menu                        │${NC}"
+        echo -e "${BOLD}└──────────────────────────────────────────────┘${NC}"
+        echo ""
+        read -rp "Select steps to execute (e.g. 1,3 or 'a' for all): " selection
+
+        if [[ "$selection" == "0" ]]; then
+            return 0
+        fi
+
+        local selected=()
+        if [[ "$selection" =~ ^[Aa]$ ]]; then
+            for i in "${!funcs[@]}"; do
+                selected+=("$i")
+            done
+        else
+            IFS=',' read -ra choices <<< "$selection"
+            for choice in "${choices[@]}"; do
+                choice=$(echo "$choice" | xargs)
+                if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#items[@]} )); then
+                    selected+=("$((choice - 1))")
+                else
+                    warn "Skipping invalid choice: $choice"
+                fi
+            done
+        fi
+
+        if [[ ${#selected[@]} -eq 0 ]]; then
+            warn "No valid steps selected."
+            continue
+        fi
+
+        echo ""
+        info "You selected:"
+        for idx in "${selected[@]}"; do
+            echo -e "  ${CYAN}→${NC} ${items[$idx]}"
+        done
+        echo ""
+        confirm "Proceed?" || continue
+
+        local completed=()
+        for idx in "${selected[@]}"; do
+            "${funcs[$idx]}"
+            completed+=("${items[$idx]}")
+            echo ""
+        done
+
+        section "SSH Security Init — Done"
+        for item in "${completed[@]}"; do
+            echo -e "  ${GREEN}✓${NC} ${item}"
+        done
+        echo ""
+        return 0
+    done
 }
 
 #============================================================================
@@ -234,7 +337,6 @@ disable_password_auth() {
     warn "Make sure you have uploaded your SSH public key and tested key-based login."
     echo ""
 
-    # Try to detect which user to check
     read -rp "Enter the username whose key should be verified: " CHECK_USER
 
     if [[ -z "$CHECK_USER" ]]; then
@@ -242,8 +344,9 @@ disable_password_auth() {
         return 1
     fi
 
+    local CHECK_HOME
     CHECK_HOME=$(eval echo "~$CHECK_USER")
-    AUTH_KEYS="${CHECK_HOME}/.ssh/authorized_keys"
+    local AUTH_KEYS="${CHECK_HOME}/.ssh/authorized_keys"
 
     if [[ ! -f "$AUTH_KEYS" ]] || [[ ! -s "$AUTH_KEYS" ]]; then
         error "No public key found in $AUTH_KEYS"
@@ -254,6 +357,7 @@ disable_password_auth() {
         return 1
     fi
 
+    local KEY_COUNT
     KEY_COUNT=$(grep -c '^ssh-' "$AUTH_KEYS" 2>/dev/null || echo 0)
     info "Found $KEY_COUNT public key(s) in $AUTH_KEYS"
     echo ""
@@ -261,30 +365,23 @@ disable_password_auth() {
     warn "Please confirm: Have you tested logging in with your SSH key? (in a separate session)"
     confirm "Proceed to disable password authentication?" || return 0
 
-    SSHD_CONFIG="/etc/ssh/sshd_config"
+    local SSHD_CONFIG="/etc/ssh/sshd_config"
     backup_file "$SSHD_CONFIG"
 
-    set_sshd_option() {
-        local key="$1"
-        local value="$2"
-        local file="$3"
-        sed -i "/^[#[:space:]]*${key}[[:space:]]/d" "$file"
-        echo "${key} ${value}" >> "$file"
-    }
-
-    set_sshd_option "PasswordAuthentication"        "no"  "$SSHD_CONFIG"
+    set_sshd_option "PasswordAuthentication"          "no"  "$SSHD_CONFIG"
     set_sshd_option "ChallengeResponseAuthentication" "no"  "$SSHD_CONFIG"
-    set_sshd_option "UsePAM"                         "no"  "$SSHD_CONFIG"
-    set_sshd_option "PubkeyAuthentication"           "yes" "$SSHD_CONFIG"
+    set_sshd_option "UsePAM"                          "no"  "$SSHD_CONFIG"
+    set_sshd_option "PubkeyAuthentication"            "yes" "$SSHD_CONFIG"
 
     if sshd -t 2>/dev/null; then
         systemctl restart sshd
         info "SSH config validation passed, service restarted."
     else
         error "SSH config validation failed! Restoring backup..."
-        LATEST_BACKUP=$(ls -t "${SSHD_CONFIG}.bak."* 2>/dev/null | head -1)
-        if [[ -n "$LATEST_BACKUP" ]]; then
-            cp "$LATEST_BACKUP" "$SSHD_CONFIG"
+        local latest_bak
+        latest_bak=$(ls -t "${SSHD_CONFIG}.bak."* 2>/dev/null | head -1)
+        if [[ -n "$latest_bak" ]]; then
+            cp "$latest_bak" "$SSHD_CONFIG"
             systemctl restart sshd
         fi
         return 1
@@ -308,7 +405,6 @@ disable_password_auth() {
 #   - Timezone & NTP
 #   - Common tools
 #============================================================================
-# ==================== Sub-functions for Option 3 ====================
 
 # Detect current SSH port (used by multiple sub-options)
 detect_ssh_port() {
@@ -427,7 +523,7 @@ UNATTENDED_EOF
 hardening_sysctl() {
     section "Kernel Network Parameter Hardening"
 
-    SYSCTL_FILE="/etc/sysctl.d/99-security.conf"
+    local SYSCTL_FILE="/etc/sysctl.d/99-security.conf"
     cat > "$SYSCTL_FILE" << 'SYSCTL_EOF'
 # ===== Network Security Hardening =====
 
@@ -479,6 +575,7 @@ SYSCTL_EOF
 hardening_timezone_ntp() {
     section "Timezone & NTP Configuration"
 
+    local CURRENT_TZ
     CURRENT_TZ=$(timedatectl show --property=Timezone --value 2>/dev/null || echo "unknown")
     echo -e "  Current timezone: ${BOLD}${CURRENT_TZ}${NC}"
     echo ""
@@ -524,7 +621,6 @@ server_security_hardening() {
     section "Option 3: Server Security Hardening"
     ensure_sshd
 
-    # Define items
     local items=(
         "System Update & Install Common Tools"
         "UFW Firewall"
@@ -545,7 +641,6 @@ server_security_hardening() {
     )
     local selected=()
 
-    # Display sub-menu
     while true; do
         echo ""
         echo -e "${BOLD}┌──────────────────────────────────────────────┐${NC}"
@@ -553,7 +648,7 @@ server_security_hardening() {
         echo -e "${BOLD}├──────────────────────────────────────────────┤${NC}"
         for i in "${!items[@]}"; do
             local idx=$((i + 1))
-            echo -e "${BOLD}│  ${idx}) ${items[$i]}$(printf '%*s' $((40 - ${#items[$i]})) '')│${NC}"
+            printf "${BOLD}│  %d) %-42s│${NC}\n" "$idx" "${items[$i]}"
         done
         echo -e "${BOLD}├──────────────────────────────────────────────┤${NC}"
         echo -e "${BOLD}│  a) Select ALL                               │${NC}"
@@ -588,7 +683,6 @@ server_security_hardening() {
             continue
         fi
 
-        # Confirm selection
         echo ""
         info "You selected:"
         for idx in "${selected[@]}"; do
@@ -597,7 +691,6 @@ server_security_hardening() {
         echo ""
         confirm "Proceed with these items?" || continue
 
-        # Execute selected items
         local completed=()
         for idx in "${selected[@]}"; do
             ${funcs[$idx]}
@@ -605,7 +698,6 @@ server_security_hardening() {
             echo ""
         done
 
-        # Summary
         section "Hardening Complete"
         for item in "${completed[@]}"; do
             echo -e "  ${GREEN}✓${NC} ${item}"
