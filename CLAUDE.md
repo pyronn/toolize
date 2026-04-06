@@ -45,3 +45,18 @@ Interactive menu-driven script with three main options:
 - All scripts use `set -euo pipefail`
 - Use the shared color/helper functions (`info`, `warn`, `error`, `section`, `confirm`) defined at the top of each script
 - New scripts under `scripts/bash/<category>/` follow the same interactive pattern with pre-flight root and OS checks
+
+## Security — Never Commit Sensitive Information
+
+**Strictly prohibited from being committed to this repository:**
+
+- Passwords, passphrases, or any credentials
+- SSH private keys (`id_rsa`, `id_ed25519`, `*.pem`, `*.key`)
+- API keys, tokens, or secrets (cloud providers, services, etc.)
+- IP addresses, hostnames, or server identifiers specific to personal infrastructure
+- Proxy credentials (usernames, passwords, server addresses)
+- Any configuration files containing the above (e.g. generated `socks-chain.json` with real credentials)
+
+**Scripts must obtain all sensitive values at runtime** (via `read`, environment variables, or command-line arguments) — never hardcode them.
+
+Before committing, verify with `git diff --staged` that no secrets are included.

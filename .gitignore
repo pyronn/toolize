@@ -1,3 +1,40 @@
+### Sensitive & Secret Files
+# SSH private keys
+id_rsa
+id_rsa*
+id_ed25519
+id_ed25519*
+id_ecdsa
+id_ecdsa*
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Environment & secrets
+.env.*
+!.env.example
+secrets.*
+*secret*
+*credential*
+*password*
+
+# Cloud provider credentials
+.aws/
+.gcloud/
+gcp-*.json
+*-serviceaccount.json
+
+# Generated configs containing credentials (e.g. sing-box proxy configs with real creds)
+socks-chain.json
+*-chain.json
+
+# Generic token/key files
+*.token
+*.apikey
+auth.json
+config.local.*
+
 ### JetBrains template
 # Covers JetBrains IDEs: IntelliJ, RubyMine, PhpStorm, AppCode, PyCharm, CLion, Android Studio, WebStorm and Rider
 # Reference: https://intellij-support.jetbrains.com/hc/en-us/articles/206544839
