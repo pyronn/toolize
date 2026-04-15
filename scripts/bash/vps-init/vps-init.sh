@@ -55,6 +55,20 @@ set_sshd_option() {
     echo "${key} ${value}" >> "$file"
 }
 
+# ==================== Restart SSH Service (sshd or ssh) ====================
+restart_ssh_service() {
+    if systemctl list-units --type=service --all | grep -q '^.*sshd\.service'; then
+        systemctl restart sshd
+        info "SSH service (sshd) restarted."
+    elif systemctl list-units --type=service --all | grep -q '^.*ssh\.service'; then
+        systemctl restart ssh
+        info "SSH service (ssh) restarted."
+    else
+        error "Could not find sshd or ssh service to restart."
+        return 1
+    fi
+}
+
 # ==================== Ensure SSHD Installed ====================
 ensure_sshd() {
     if command -v sshd &>/dev/null && systemctl is-active --quiet ssh 2>/dev/null; then
@@ -83,8 +97,9 @@ show_menu() {
     echo -e "${BOLD}║       VPS Server Initialization Script       ║${NC}"
     echo -e "${BOLD}╠══════════════════════════════════════════════╣${NC}"
     echo -e "${BOLD}║  1) SSH Security Init (Create User + SSH)    ║${NC}"
-    echo -e "${BOLD}║  2) Disable Password Auth (After Key Upload) ║${NC}"
-    echo -e "${BOLD}║  3) Server Security Hardening                ║${NC}"
+    echo -e "${BOLD}║  2) Add Public Key to authorized_keys        ║${NC}"
+    echo -e "${BOLD}║  3) Disable Password Auth (After Key Upload) ║${NC}"
+    echo -e "${BOLD}║  4) Server Security Hardening                ║${NC}"
     echo -e "${BOLD}║  0) Exit                                     ║${NC}"
     echo -e "${BOLD}╚══════════════════════════════════════════════╝${NC}"
     echo ""
@@ -226,8 +241,7 @@ ssh_step_configure_daemon() {
     fi
     rm -f "$SSHD_TMP"
 
-    systemctl restart sshd
-    info "SSH service restarted."
+    restart_ssh_service
 
     echo ""
     echo -e "  ${GREEN}✓${NC} Root SSH login:    ${RED}disabled${NC}"
@@ -325,12 +339,73 @@ ssh_security_init() {
 }
 
 #============================================================================
-# Option 2: Disable Password Authentication
+# Option 2: Add Public Key to authorized_keys
+#============================================================================
+add_public_key() {
+    section "Option 2: Add Public Key to authorized_keys"
+
+    read -rp "Enter the username to add the public key for: " TARGET_USER
+
+    if [[ -z "$TARGET_USER" ]]; then
+        error "Username cannot be empty."
+        return 1
+    fi
+
+    if ! id "$TARGET_USER" &>/dev/null; then
+        error "User '$TARGET_USER' does not exist on this system."
+        return 1
+    fi
+
+    local user_home
+    user_home=$(eval echo "~$TARGET_USER")
+    local auth_keys="${user_home}/.ssh/authorized_keys"
+
+    mkdir -p "${user_home}/.ssh"
+    chmod 700 "${user_home}/.ssh"
+    touch "$auth_keys"
+    chmod 600 "$auth_keys"
+    chown -R "${TARGET_USER}:${TARGET_USER}" "${user_home}/.ssh"
+
+    echo ""
+    info "Paste the public key below, then press Enter followed by Ctrl+D:"
+    echo ""
+    local pubkey
+    pubkey=$(cat)
+
+    if [[ -z "$pubkey" ]]; then
+        error "No public key entered. Aborting."
+        return 1
+    fi
+
+    if ! echo "$pubkey" | grep -qE '^(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521|sk-ssh-ed25519|sk-ecdsa-sha2-nistp256) '; then
+        warn "Input does not look like a valid SSH public key."
+        confirm "Add it anyway?" || return 1
+    fi
+
+    # Check for duplicate
+    if grep -qF "$pubkey" "$auth_keys" 2>/dev/null; then
+        warn "This public key already exists in $auth_keys. Skipping."
+        return 0
+    fi
+
+    echo "$pubkey" >> "$auth_keys"
+    chown "${TARGET_USER}:${TARGET_USER}" "$auth_keys"
+
+    local key_count
+    key_count=$(grep -c '^ssh-\|^ecdsa-\|^sk-' "$auth_keys" 2>/dev/null || echo 0)
+
+    echo ""
+    echo -e "  ${GREEN}✓${NC} Public key added to: ${CYAN}${auth_keys}${NC}"
+    echo -e "  ${GREEN}✓${NC} Total keys in file:  ${BOLD}${key_count}${NC}"
+}
+
+#============================================================================
+# Option 3: Disable Password Authentication
 #   - Verify public key exists
 #   - Disable password auth in sshd_config
 #============================================================================
 disable_password_auth() {
-    section "Option 2: Disable Password Authentication"
+    section "Option 3: Disable Password Authentication"
     ensure_sshd
 
     warn "This will disable password login for ALL users."
@@ -374,15 +449,15 @@ disable_password_auth() {
     set_sshd_option "PubkeyAuthentication"            "yes" "$SSHD_CONFIG"
 
     if sshd -t 2>/dev/null; then
-        systemctl restart sshd
-        info "SSH config validation passed, service restarted."
+        restart_ssh_service
+        info "SSH config validation passed."
     else
         error "SSH config validation failed! Restoring backup..."
         local latest_bak
         latest_bak=$(ls -t "${SSHD_CONFIG}.bak."* 2>/dev/null | head -1)
         if [[ -n "$latest_bak" ]]; then
             cp "$latest_bak" "$SSHD_CONFIG"
-            systemctl restart sshd
+            restart_ssh_service
         fi
         return 1
     fi
@@ -618,7 +693,7 @@ hardening_disable_services() {
 
 # ==================== Option 3: Server Security Hardening ====================
 server_security_hardening() {
-    section "Option 3: Server Security Hardening"
+    section "Option 4: Server Security Hardening"
     ensure_sshd
 
     local items=(
@@ -713,11 +788,12 @@ server_security_hardening() {
 main() {
     while true; do
         show_menu
-        read -rp "Select an option [0-3]: " choice
+        read -rp "Select an option [0-4]: " choice
         case "$choice" in
             1) ssh_security_init ;;
-            2) disable_password_auth ;;
-            3) server_security_hardening ;;
+            2) add_public_key ;;
+            3) disable_password_auth ;;
+            4) server_security_hardening ;;
             0)
                 info "Goodbye!"
                 exit 0
