@@ -57,10 +57,10 @@ set_sshd_option() {
 
 # ==================== Restart SSH Service (sshd or ssh) ====================
 restart_ssh_service() {
-    if systemctl list-units --type=service --all | grep -q '^.*sshd\.service'; then
+    if systemctl cat sshd &>/dev/null; then
         systemctl restart sshd
         info "SSH service (sshd) restarted."
-    elif systemctl list-units --type=service --all | grep -q '^.*ssh\.service'; then
+    elif systemctl cat ssh &>/dev/null; then
         systemctl restart ssh
         info "SSH service (ssh) restarted."
     else
