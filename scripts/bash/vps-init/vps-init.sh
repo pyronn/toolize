@@ -47,11 +47,24 @@ backup_file() {
 
 # ==================== Global SSH Config Helper ====================
 # Removes all existing lines (including commented) for a key, then appends the new value.
+# Also purges the same key from /etc/ssh/sshd_config.d/*.conf drop-in files so that
+# the value set here is not overridden (Ubuntu 24.04+ uses Include with first-match wins).
 set_sshd_option() {
     local key="$1"
     local value="$2"
     local file="$3"
     sed -i "/^[#[:space:]]*${key}[[:space:]]/d" "$file"
+    # Remove the same key from drop-in config files to avoid first-match override
+    if [[ -d /etc/ssh/sshd_config.d ]]; then
+        local dropin
+        for dropin in /etc/ssh/sshd_config.d/*.conf; do
+            [[ -f "$dropin" ]] || continue
+            if grep -qE "^[#[:space:]]*${key}[[:space:]]" "$dropin" 2>/dev/null; then
+                sed -i "/^[#[:space:]]*${key}[[:space:]]/d" "$dropin"
+                info "Removed conflicting '${key}' from drop-in: ${dropin}"
+            fi
+        done
+    fi
     echo "${key} ${value}" >> "$file"
 }
 
@@ -71,7 +84,7 @@ restart_ssh_service() {
 
 # ==================== Ensure SSHD Installed ====================
 ensure_sshd() {
-    if command -v sshd &>/dev/null && systemctl is-active --quiet ssh 2>/dev/null; then
+    if command -v sshd &>/dev/null && (systemctl is-active --quiet ssh 2>/dev/null || systemctl is-active --quiet sshd 2>/dev/null); then
         return 0
     fi
 
@@ -79,10 +92,16 @@ ensure_sshd() {
     info "Installing openssh-server..."
     apt-get update -y
     apt-get install -y openssh-server
-    systemctl enable ssh
-    systemctl start ssh
+    # Enable whichever service unit exists (ssh on Ubuntu, sshd on some variants)
+    if systemctl cat ssh &>/dev/null; then
+        systemctl enable ssh
+        systemctl start ssh
+    elif systemctl cat sshd &>/dev/null; then
+        systemctl enable sshd
+        systemctl start sshd
+    fi
 
-    if systemctl is-active --quiet ssh 2>/dev/null; then
+    if systemctl is-active --quiet ssh 2>/dev/null || systemctl is-active --quiet sshd 2>/dev/null; then
         info "OpenSSH Server installed and running."
     else
         error "Failed to start SSH service. Please check manually."
@@ -444,7 +463,7 @@ disable_password_auth() {
     backup_file "$SSHD_CONFIG"
 
     set_sshd_option "PasswordAuthentication"          "no"  "$SSHD_CONFIG"
-    set_sshd_option "ChallengeResponseAuthentication" "no"  "$SSHD_CONFIG"
+    set_sshd_option "KbdInteractiveAuthentication" "no"  "$SSHD_CONFIG"
     set_sshd_option "UsePAM"                          "no"  "$SSHD_CONFIG"
     set_sshd_option "PubkeyAuthentication"            "yes" "$SSHD_CONFIG"
 
@@ -497,8 +516,7 @@ hardening_system_update() {
     apt-get install -y \
         curl wget vim htop iotop net-tools \
         unzip zip git tmux lsof tree jq \
-        software-properties-common apt-transport-https \
-        ca-certificates gnupg
+        software-properties-common ca-certificates gnupg
     info "Common tools installed."
 }
 

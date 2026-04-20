@@ -9,10 +9,15 @@ Personal collection of tools and scripts. Currently contains bash scripts for VP
 ## Repository Structure
 
 ```
+docs/
+  vps-init.md                # vps-init.sh 详细使用文档
+  add-socks5-static-ip.md    # add-socks5-static-ip.sh 详细使用文档
 scripts/
   bash/
     vps-init/
-      vps-init.sh   # Interactive VPS initialization script for Ubuntu
+      vps-init.sh            # Interactive VPS initialization script for Ubuntu
+    proxy/
+      add-socks5-static-ip.sh # sing-box SOCKS5 链式代理配置生成脚本
 ```
 
 ## Running Scripts
@@ -45,6 +50,19 @@ Interactive menu-driven script with three main options:
 - All scripts use `set -euo pipefail`
 - Use the shared color/helper functions (`info`, `warn`, `error`, `section`, `confirm`) defined at the top of each script
 - New scripts under `scripts/bash/<category>/` follow the same interactive pattern with pre-flight root and OS checks
+
+## Documentation Requirement
+
+Every script must have a corresponding documentation file in the `docs/` directory. Documentation file name should match the script name (e.g. `vps-init.sh` → `docs/vps-init.md`).
+
+**When adding a new script:**
+- Create a documentation file in `docs/<script-name>.md`
+- Include: basic info (path, environment, dependencies), usage examples, detailed parameter/option descriptions, execution flow, and any rollback/uninstall instructions
+- Update the Repository Structure section above
+
+**When modifying an existing script:**
+- Update the corresponding documentation to reflect the changes
+- If new options, parameters, or behavior are added, document them
 
 ## Security — Never Commit Sensitive Information
 
